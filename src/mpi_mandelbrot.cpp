@@ -3,6 +3,9 @@
 
 #include <mpi.h>
 
+#define WORKTAG 1
+#define DIETAG 2
+
 // ======================================================
 // ======================================================
 struct MandelbrotParams
@@ -81,6 +84,9 @@ struct MandelbrotParams
         delta_j = delta_j_;
     }
 
+    MandelbrotParams()
+    {}
+
 }; // struct MandelbrotParams
 
 // ======================================================
@@ -95,10 +101,12 @@ public:
         data = new unsigned char[m_params.delta_i*m_params.delta_j];
     }
 
+
     ~MandelbrotSet()
     {
         delete[] data;
     }
+
 
     void compute()
     {
@@ -114,7 +122,7 @@ public:
                 // local coordinates
                 int il = i - imin;
                 int jl = j - jmin;
-                data[il + NX*jl] = compute_pixel(i, j);
+                data[il + delta_i*jl] = compute_pixel(i, j);
             }
     }
 
@@ -192,6 +200,7 @@ void write_screen(unsigned char*            data,
 
 // ======================================================
 // ======================================================
+
 void write_ppm(unsigned char*            data,
                const std::string&        filename,
                const MandelbrotParams&   params)
@@ -206,7 +215,6 @@ void write_ppm(unsigned char*            data,
     {
         for(unsigned int j=0; j<NY; ++j)
         {
-
             unsigned char pix;
             // create an arbitrary RBG code mapping values taken by imageHost
             pix = data[i+NX*j] % 4 * 64;
@@ -222,114 +230,206 @@ void write_ppm(unsigned char*            data,
 
 } // write_ppm
 
+void master (MandelbrotParams &params, int &rank)
+{
+    int nbTask;
+    MPI_Status status;
+
+    MPI_Comm_size(MPI_COMM_WORLD, &nbTask);
+
+    int pos_i = 0;
+    int pos_j = 0;
+
+    // First send
+    int paramsRank[(nbTask-1)*2];
+    int* pos = new int[2];
+
+
+    for (rank = 1; rank < nbTask; ++rank)
+    {
+        paramsRank[2*rank-2] = pos_i;
+        paramsRank[2*rank-1] = pos_j;
+
+        pos[0] = pos_i;
+        pos[1] = pos_j;
+
+        MPI_Send(pos, 2, MPI_INT, rank, WORKTAG, MPI_COMM_WORLD);
+
+        pos_i = pos_i + params.delta_i;
+
+        if (pos_i >= params.NX)
+        {
+            pos_i = 0;
+            pos_j = pos_j + params.delta_i;
+
+            if (pos_j >= params.NY)
+                break;
+        }
+    }
+
+    unsigned int NX = params.NX;
+    unsigned int NY = params.NY;
+    int delta_i = params.delta_i;
+    int delta_j = params.delta_j;
+
+    unsigned char *image = new unsigned char[NX*NY];
+
+    // assemble pieces from other MPI processes
+    // allocate buffer
+    int recv_size = delta_i*delta_j;
+    unsigned char * buffer = new unsigned char[recv_size];
+
+    while (pos_j < params.NY)
+    {
+
+        MPI_Recv(buffer, recv_size, MPI_UNSIGNED_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+        rank = status.MPI_SOURCE;
+
+        int imin = paramsRank[2*rank-2];
+        int imax = imin+params.delta_i;
+
+        int jmin = paramsRank[2*rank-1];
+        int jmax = jmin+params.delta_j;
+
+        // write buffer in global image
+        for (int j = jmin; j<jmax; ++j)
+        {
+            int jl = j - jmin;
+            for (int i = imin; i<imax; ++i)
+            {
+                // local coordinates
+                int il = i - imin;
+                image[i+NX*j] = buffer[il+params.delta_i*jl];
+            }
+        }
+
+        paramsRank[2*rank-2] = pos_i;
+        paramsRank[2*rank-1] = pos_j;
+
+
+        pos[0] = pos_i;
+        pos[1] = pos_j;
+
+        MPI_Send(pos, 2, MPI_INT, rank, WORKTAG, MPI_COMM_WORLD);
+
+        pos_i = pos_i + params.delta_i;
+
+        if (pos_i >= params.NX)
+        {
+            pos_i = 0;
+            pos_j = pos_j + params.delta_j;
+        }
+    }
+    /*
+     * Receive results for pending work requests.
+     */
+    for (rank = 1; rank < nbTask; ++rank)
+    {
+        MPI_Recv(buffer, recv_size, MPI_UNSIGNED_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+        int imin = paramsRank[2*status.MPI_SOURCE-2];
+        int imax = imin+params.delta_i;
+
+        int jmin = paramsRank[2*status.MPI_SOURCE-1];
+        int jmax = jmin+params.delta_j;
+
+        // write buffer in global image
+        for (int j = jmin; j<jmax; ++j)
+        {
+            int jl = j - jmin;
+            for (int i = imin; i<imax; ++i)
+            {
+                // local coordinates
+                int il = i - imin;
+                image[i+NX*j] = buffer[il+params.delta_i*jl];
+            }
+        }
+    }
+
+    /*
+     * Tell all the workers to exit.
+     */
+
+    for (rank = 1; rank < nbTask; ++rank) {
+        MPI_Send(0, 0, MPI_INT, rank, DIETAG, MPI_COMM_WORLD);
+    }
+
+    // finally write complete image
+    write_ppm(image, "mandelbrot.ppm", params);
+    //write_screen(image, *paramsRank[0]);
+
+    delete[] image;
+}
+
+void worker (MandelbrotParams &params, int &myRank)
+{
+    MPI_Status status;
+    int* pos = new int[2];
+    
+    while (true)
+    {
+        MPI_Recv(pos, 2, MPI_INT, 0, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+
+        /* Check the tag of the received message */
+        if (status.MPI_TAG == DIETAG)
+            return;
+
+        params.imin = pos[0];
+        params.jmin = pos[1];
+
+        MandelbrotSet mset = MandelbrotSet(params);
+        mset.compute();
+
+        // send data to process 0
+        int delta_i = params.delta_i;
+        int delta_j = params.delta_j;
+        int send_size = delta_i*delta_j;
+
+        MPI_Send(mset.data, send_size, MPI_UNSIGNED_CHAR, 0, myRank, MPI_COMM_WORLD);
+    }
+
+}
+
 // ======================================================
 // ======================================================
 int main(int argc, char* argv[])
 {
 
-    int nbTask;
-    int myRank;
-    MPI_Status status;
+    int global_size = 512;
+    int global_cell_size = 32;
 
+    if (argc == 3) {
+        global_size = atoi(argv[1]);
+        global_cell_size = atoi(argv[2]);
+    }
+
+    if (global_size % global_cell_size != 0)
+        return EXIT_FAILURE;
+
+    int cell_size_i = global_cell_size;
+    int cell_size_j = global_cell_size;
+
+    int myRank;
 
     MPI_Init(&argc, &argv);
 
-    MPI_Comm_size(MPI_COMM_WORLD, &nbTask);
     MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
 
-    const int global_size = 512;
-
-    int local_size = global_size/nbTask;
-    // if nbTask is not a divisor of global_size, we round-up in last
-    // mpi rank
-    if (nbTask*local_size < global_size and myRank==nbTask-1)
-    {
-        local_size = global_size - (nbTask-1)*local_size;
-    }
-
-    //printf("[MPI rank=%d] local_size=%d\n",myRank,local_size);
-
     MandelbrotParams params = MandelbrotParams(global_size,
-                                               0,
-                                               local_size*myRank,
-                                               global_size,
-                                               local_size);
-    MandelbrotSet mset = MandelbrotSet(params);
-    mset.compute();
+                              0,
+                              0,
+                              cell_size_i,
+                              cell_size_j);
 
-    //write_screen(mset.data, params);
-
-    // process 0 collects all pieces and write results in a ppm image
-    unsigned char* image;
     if (myRank == 0)
     {
-        auto& NX = params.NX;
-        auto& NY = params.NY;
-        auto& imin = params.imin;
-        auto& jmin = params.jmin;
-        auto& delta_i = params.delta_i;
-        auto& delta_j = params.delta_j;
-
-        image = new unsigned char[NX*NY];
-
-        // copy our own piece into image
-        for (int j = jmin; j<jmin+delta_j; ++j)
-            for (int i = imin; i<imin+delta_i; ++i)
-            {
-                // local coordinates
-                int il = i - imin;
-                int jl = j - jmin;
-                image[i+NX*j] = mset.data[il+NX*jl];
-            }
-
-        // assemble pieces from other MPI processes
-        // allocate buffer
-        int delta_j_max = global_size - (nbTask-1)*local_size;
-        unsigned char * buffer = new unsigned char[delta_i*delta_j_max];
-
-        for (int iRank=1; iRank<nbTask; ++iRank)
-        {
-            int recv_size = (iRank == nbTask-1) ? delta_i*delta_j_max : delta_i*delta_j;
-
-            //printf("[MPI rank=%d] recv_size=%d from rank %d\n",myRank,recv_size, iRank);
-
-            MPI_Recv(buffer, recv_size, MPI_UNSIGNED_CHAR, iRank, iRank, MPI_COMM_WORLD, &status);
-
-            auto jmin2 = local_size*iRank;
-            auto jmax2 = jmin2+delta_j_max;
-
-            // write buffer in global image
-            for (int j = jmin2; j<jmax2; ++j)
-            {
-                for (int i = imin; i<imin+delta_i; ++i)
-                {
-                    // local coordinates
-                    int il = i - imin;
-                    int jl = j - jmin2;
-                    image[i+NX*j] = buffer[il+NX*jl];
-                }
-            }
-
-        } // end for iRank
-
-        // finally write complete image
-        write_ppm(image, "mandelbrot.ppm", params);
-
-        delete[] image;
+        master(params, myRank);
     }
     else
     {
-        // send data to process 0
-        auto& delta_i = params.delta_i;
-        auto& delta_j = params.delta_j;
-        int send_size = delta_i*delta_j;
-
-        //printf("[MPI rank=%d] send_size=%d\n",myRank,send_size);
-
-        MPI_Send(mset.data, send_size, MPI_UNSIGNED_CHAR, 0, myRank, MPI_COMM_WORLD);
-
+        worker(params, myRank);
     }
-
 
     MPI_Finalize();
 
