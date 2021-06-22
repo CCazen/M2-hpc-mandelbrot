@@ -57,7 +57,7 @@ struct MandelbrotParams
     MandelbrotParams(int default_size)
             : NX(default_size),
               NY(default_size),
-              MAX_ITERS(4000),
+              MAX_ITERS(6000),
               MAX_COLOR(255),
               xmin(-1.7),
               ymin(-1.2),
@@ -217,12 +217,42 @@ void write_ppm(unsigned char*            data,
         {
             unsigned char pix;
             // create an arbitrary RBG code mapping values taken by imageHost
-            pix = data[i+NX*j] % 4 * 64;
+            /*pix = data[i+NX*j] % 4 * 64;
             fwrite(&pix,1,1,myfile);
             pix = data[i+NX*j] % 8 * 32;
             fwrite(&pix,1,1,myfile);
             pix = data[i+NX*j] % 16 * 16;
-            fwrite(&pix,1,1,myfile);
+            fwrite(&pix,1,1,myfile);*/
+
+
+            if (data[i+NX*j] == 255)
+            {
+                pix = 220;
+                fwrite(&pix,1,1,myfile);
+                pix = 220;
+                fwrite(&pix,1,1,myfile);
+                pix = 220;
+                fwrite(&pix,1,1,myfile);
+            }
+            else if (data[i+NX*j] == 0)
+            {
+                pix = 0;
+                fwrite(&pix,1,1,myfile);
+                pix = 0;
+                fwrite(&pix,1,1,myfile);
+                pix = 55;
+                fwrite(&pix,1,1,myfile);
+            }
+            else
+            {
+                pix = data[i+NX*j] % 8 * 30;
+                fwrite(&pix,1,1,myfile);
+                pix = data[i+NX*j] % 8 * 30;
+                fwrite(&pix,1,1,myfile);
+                pix = 255;
+                fwrite(&pix,1,1,myfile);
+            }
+
         }
     }
 
@@ -328,6 +358,9 @@ void master (MandelbrotParams &params, int &rank)
     {
         MPI_Recv(buffer, recv_size, MPI_UNSIGNED_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
+        //Used to kill worker before the end of this loop
+        //MPI_Send(0, 0, MPI_INT, status.MPI_SOURCE, DIETAG, MPI_COMM_WORLD);
+
         int imin = paramsRank[2*status.MPI_SOURCE-2];
         int imax = imin+params.delta_i;
 
@@ -350,14 +383,12 @@ void master (MandelbrotParams &params, int &rank)
     /*
      * Tell all the workers to exit.
      */
-
     for (rank = 1; rank < nbTask; ++rank) {
         MPI_Send(0, 0, MPI_INT, rank, DIETAG, MPI_COMM_WORLD);
     }
 
     // finally write complete image
     write_ppm(image, "mandelbrot.ppm", params);
-    //write_screen(image, *paramsRank[0]);
 
     delete[] image;
 }
