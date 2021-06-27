@@ -84,9 +84,6 @@ struct MandelbrotParams
         delta_j = delta_j_;
     }
 
-    MandelbrotParams()
-    {}
-
 }; // struct MandelbrotParams
 
 // ======================================================
@@ -217,14 +214,6 @@ void write_ppm(unsigned char*            data,
         {
             unsigned char pix;
             // create an arbitrary RBG code mapping values taken by imageHost
-            /*pix = data[i+NX*j] % 4 * 64;
-            fwrite(&pix,1,1,myfile);
-            pix = data[i+NX*j] % 8 * 32;
-            fwrite(&pix,1,1,myfile);
-            pix = data[i+NX*j] % 16 * 16;
-            fwrite(&pix,1,1,myfile);*/
-
-
             if (data[i+NX*j] == 255)
             {
                 pix = 220;
@@ -260,20 +249,22 @@ void write_ppm(unsigned char*            data,
 
 } // write_ppm
 
-void master (MandelbrotParams &params, int &rank)
+void master (MandelbrotParams &params)
 {
     int nbTask;
     MPI_Status status;
 
     MPI_Comm_size(MPI_COMM_WORLD, &nbTask);
 
+    // ======================== INIT ======================
     int pos_i = 0;
     int pos_j = 0;
 
     // First send
     int paramsRank[(nbTask-1)*2];
     int* pos = new int[2];
-
+    int rank;
+    int realNbTask = 1;
 
     for (rank = 1; rank < nbTask; ++rank)
     {
@@ -287,6 +278,8 @@ void master (MandelbrotParams &params, int &rank)
 
         pos_i = pos_i + params.delta_i;
 
+        realNbTask = realNbTask + 1;
+
         if (pos_i >= params.NX)
         {
             pos_i = 0;
@@ -297,21 +290,29 @@ void master (MandelbrotParams &params, int &rank)
         }
     }
 
+    // Kill Non used task
+    // Waste of time
+    /*for (rank = realNbTask; rank < nbTask; ++rank) {
+        MPI_Send(0, 0, MPI_INT, rank, DIETAG, MPI_COMM_WORLD);
+    }*/
+
+
+
+    //=============== assemble pieces from other MPI processes =======================
+
     unsigned int NX = params.NX;
     unsigned int NY = params.NY;
     int delta_i = params.delta_i;
     int delta_j = params.delta_j;
 
-    unsigned char *image = new unsigned char[NX*NY];
-
-    // assemble pieces from other MPI processes
     // allocate buffer
     int recv_size = delta_i*delta_j;
     unsigned char * buffer = new unsigned char[recv_size];
 
+    unsigned char *image = new unsigned char[NX*NY];
+
     while (pos_j < params.NY)
     {
-
         MPI_Recv(buffer, recv_size, MPI_UNSIGNED_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
 
         rank = status.MPI_SOURCE;
@@ -354,12 +355,9 @@ void master (MandelbrotParams &params, int &rank)
     /*
      * Receive results for pending work requests.
      */
-    for (rank = 1; rank < nbTask; ++rank)
+    for (rank = 1; rank < realNbTask; ++rank)
     {
         MPI_Recv(buffer, recv_size, MPI_UNSIGNED_CHAR, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-
-        //Used to kill worker before the end of this loop
-        //MPI_Send(0, 0, MPI_INT, status.MPI_SOURCE, DIETAG, MPI_COMM_WORLD);
 
         int imin = paramsRank[2*status.MPI_SOURCE-2];
         int imax = imin+params.delta_i;
@@ -380,10 +378,11 @@ void master (MandelbrotParams &params, int &rank)
         }
     }
 
+    // ======================== FINALIZE ======================
     /*
      * Tell all the workers to exit.
      */
-    for (rank = 1; rank < nbTask; ++rank) {
+    for (rank = 1; rank < realNbTask; ++rank) {
         MPI_Send(0, 0, MPI_INT, rank, DIETAG, MPI_COMM_WORLD);
     }
 
@@ -391,9 +390,11 @@ void master (MandelbrotParams &params, int &rank)
     write_ppm(image, "mandelbrot.ppm", params);
 
     delete[] image;
+    delete[] buffer;
+    delete[] pos;
 }
 
-void worker (MandelbrotParams &params, int &myRank)
+void worker (MandelbrotParams &params, int myRank)
 {
     MPI_Status status;
     int* pos = new int[2];
@@ -404,7 +405,10 @@ void worker (MandelbrotParams &params, int &myRank)
 
         /* Check the tag of the received message */
         if (status.MPI_TAG == DIETAG)
+        {
+            delete[] pos;
             return;
+        }
 
         params.imin = pos[0];
         params.jmin = pos[1];
@@ -435,16 +439,17 @@ int main(int argc, char* argv[])
         global_cell_size = atoi(argv[2]);
     }
 
+    if (global_cell_size > global_size)
+        global_cell_size = global_size;
+
     if (global_size % global_cell_size != 0)
         return EXIT_FAILURE;
 
     int cell_size_i = global_cell_size;
     int cell_size_j = global_cell_size;
-
     int myRank;
 
     MPI_Init(&argc, &argv);
-
     MPI_Comm_rank(MPI_COMM_WORLD, &myRank);
 
     MandelbrotParams params = MandelbrotParams(global_size,
@@ -455,7 +460,7 @@ int main(int argc, char* argv[])
 
     if (myRank == 0)
     {
-        master(params, myRank);
+        master(params);
     }
     else
     {
