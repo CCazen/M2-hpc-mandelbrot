@@ -216,11 +216,11 @@ void write_ppm(unsigned char*            data,
             // create an arbitrary RBG code mapping values taken by imageHost
             if (data[i+NX*j] == 255)
             {
-                pix = 220;
+                pix = 0;
                 fwrite(&pix,1,1,myfile);
-                pix = 220;
+                pix = 0;
                 fwrite(&pix,1,1,myfile);
-                pix = 220;
+                pix = 0;
                 fwrite(&pix,1,1,myfile);
             }
             else if (data[i+NX*j] == 0)
